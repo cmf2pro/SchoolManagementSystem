@@ -1,0 +1,11 @@
+Browser (Index.html + Styles.html + JavaScript.html)
+   │  api(action, params) → google.script.run
+   ▼
+processApiRequest(action, params)   [Api.gs dispatcher]
+   ├── authenticate(token)           → Auth.gs (SHA-256 hashed passwords, session tokens in CacheService)
+   ├── authorize(action)             → Permissions.gs (role → permission map, server-side)
+   ├── execute handler               → Module .gs files (Students.gs, Fees.gs, ...)
+   ├── logAudit()                    → Database.gs
+   └── return { status, data, message }
+   ▼
+Google Sheets (50+ sheets, auto-created & idempotent via Setup.gs)

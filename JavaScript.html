@@ -1,6 +1,563 @@
 <script>
 /* EduCare School ERP — Frontend core */
 var STATE = { token: localStorage.getItem("edu_token") || "", user: null,
-  currentTab: "dashboard", currentAcademicYear: null
+  currentTab: "dashboard", currentAcademicYear: null, data: {}, page: {}, perms: {} };
+
+/* ---------- helpers ---------- */
+function esc(v){ return String(v===undefined||v===null?"":v).replace(/[&<>"']/g,function(m){
+  return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]; }); }
+function $(id){ return document.getElementById(id); }
+function showLoading(){ $("loadingOverlay").classList.remove("hidden"); }
+function hideLoading(){ $("loadingOverlay").classList.add("hidden"); }
+function toast(msg, type){
+  var t = document.createElement("div"); t.className = "toast " + (type||"info");
+  var ic = {success:"fa-check-circle",error:"fa-times-circle",warning:"fa-triangle-exclamation",info:"fa-info-circle"}[type]||"fa-info-circle";
+  t.innerHTML = '<i class="fa-solid '+ic+'"></i> '+esc(msg);
+  $("toasts").appendChild(t); setTimeout(function(){ t.remove(); }, 4000);
+}
+function api(action, params, cb){
+  showLoading();
+  params = params || {}; params.token = STATE.token;
+  google.script.run
+    .withSuccessHandler(function(res){ hideLoading(); cb(res); })
+    .withFailureHandler(function(err){ hideLoading(); toast(err.message || "Request failed","error"); cb({status:"error",message:String(err)}); })
+    .processApiRequest(action, params);
+}
+function badge(v){
+  var cls = {Active:"green",Present:"green",Paid:"green",Submitted:"green",Approved:"green",
+    Absent:"red",Inactive:"gray",Pending:"yellow",Late:"yellow",Draft:"gray",Draft_Locked:"red",
+    Locked:"red",Rejected:"red",Leave:"blue",Half_Day:"blue",Graduated:"blue",Transferred:"blue"}[String(v).replace(" ","_")];
+  return '<span class="badge '+(cls||"gray")+'">'+esc(v||"-")+'</span>';
+}
+function confirmAction(msg, cb){
+  ("confirmMsg").textContent=msg;("confirmMsg").textContent = msg;("confirmMsg").textContent=msg;("confirmBackdrop").classList.remove("hidden");
+  $("confirmOk").onclick = function(){ closeConfirm(); cb(); };
+}
+function closeConfirm(){ $("confirmBackdrop").classList.add("hidden"); }
+function openModal(title, bodyHtml, footerHtml){
+  ("modalTitle").textContent=title;("modalTitle").textContent = title;("modalTitle").textContent=title;("modalBody").innerHTML = bodyHtml;
+  $("modalFooter").innerHTML = footerHtml || '<button class="btn btn-secondary" onclick="closeModal()">Close</button>';
+  $("modalBackdrop").classList.remove("hidden");
+}
+function closeModal(){ $("modalBackdrop").classList.add("hidden"); }
+document.addEventListener("keydown", function(e){ if(e.key==="Escape"){ closeModal(); closeConfirm(); } });
+$("modalBackdrop").addEventListener("click", function(e){ if(e.target===this) closeModal(); });
+function toggleSidebar(open){
+  $("sidebar").classList.toggle("open", open);
+  $("sidebarOverlay").classList.toggle("show", open);
+}
+function fmtDate(v){ if(!v) return "-"; try{ var d=new Date(v); return isNaN(d)?v:d.toLocaleDateString("en-GB"); }catch(e){ return v; } }
+function emptyState(msg){ return '<div class="empty-state"><i class="fa-solid fa-inbox"></i><p>'+esc(msg)+'</p></div>'; }
+
+/* ---------- navigation ---------- */
+var NAV = [
+  ["MAIN", [["dashboard","Dashboard","fa-gauge"]]],
+  ["ACADEMIC", [["students","Students","fa-user-graduate"],["classes","Classes","fa-chalkboard"],
+    ["sections","Sections","fa-door-open"],["subjects","Subjects","fa-book"],
+    ["houses","Houses","fa-flag"],["timetable","Timetable","fa-clock"]]],
+  ["PEOPLE", [["teachers","Teachers","fa-chalkboard-user"],["parents","Parents","fa-users"],
+    ["admissions","Admissions","fa-file-signature"]]],
+  ["ATTENDANCE", [["attendance","Student Attendance","fa-calendar-check"]]],
+  ["EXAMINATION", [["exams","Exams","fa-file-pen"],["marks","Marks Entry","fa-pen-to-square"]]],
+  ["FINANCE", [["fees","Fee Collection","fa-money-bill"],["feestructures","Fee Structure","fa-list"],
+    ["expenses","Expenses","fa-receipt"],["income","Income","fa-sack-dollar"]]],
+  ["LIBRARY", [["books","Books","fa-book-open"]]],
+  ["HR", [["staff","Employees","fa-id-badge"],["leaves","Leave Management","fa-plane"]]],
+  ["TRANSPORT", [["vehicles","Vehicles","fa-bus"]]],
+  ["SERVICES", [["homework","Homework","fa-tasks"],["notices","Notices","fa-bullhorn"],
+    ["events","Events","fa-calendar-days"]]],
+  ["ADMINISTRATION", [["users","Users","fa-user-shield"],["roles","Roles","fa-key"],
+    ["academicyears","Academic Years","fa-calendar"],["settings","School Settings","fa-gear"]]]
+];
+
+function renderNav(){
+  var html = "";
+  NAV.forEach(function(g){
+    html += '<div class="nav-group-label">'+g[0]+'</div>';
+    g[1].forEach(function(item){
+      html += '<div class="nav-item'+(STATE.currentTab===item[0]?" active":"")+
+        '" onclick="switchTab(\''+item[0]+'\')"><i class="fa-solid '+item[2]+'"></i> '+item[1]+'</div>';
+    });
+  });
+  html += '<div class="nav-group-label">ACCOUNT</div><div class="nav-item" onclick="doLogout()"><i class="fa-solid fa-right-from-bracket"></i> Logout</div>';
+  $("sidebarNav").innerHTML = html;
+}
+function switchTab(tab){
+  STATE.currentTab = tab; STATE.page[tab] = 1;
+  toggleSidebar(false); renderNav();
+  var titles = {}; NAV.forEach(function(g){ g[1].forEach(function(i){ titles[i[0]]=i[1]; }); });
+  $("pageTitle").textContent = titles[tab] || tab;
+  var renderers = { dashboard:renderDashboard, students:renderStudents, attendance:renderAttendance,
+    fees:renderFeeCollection, classes:renderClasses, settings:renderSettings };
+  if (renderers[tab]) renderers[tab]();
+  else if (GENERIC_MODULES[tab]) renderGenericModule(tab);
+  else $("content").innerHTML = emptyState("Module coming in next delivery");
+}
+function toggleSidebarForce(){ }
+
+/* ---------- auth ---------- */
+function doLogin(e){
+  e.preventDefault();
+  var btn = $("loginBtn"); btn.disabled = true;
+  google.script.run.withSuccessHandler(function(res){
+    btn.disabled = false;
+    if (res.status === "error") { toast(res.message, "error"); return; }
+    STATE.token = res.data.token; STATE.user = res.data.user;
+    localStorage.setItem("edu_token", STATE.token);
+    enterApp();
+  }).withFailureHandler(function(err){ btn.disabled = false; toast("Login failed","error"); })
+    .processApiRequest("auth.login", { username: ("loginUser").value,password:("loginUser").value, password:("loginUser").value,password:("loginPass").value });
+  return false;
+}
+function doLogout(){
+  confirmAction("Logout from EduCare ERP?", function(){
+    google.script.run.processApiRequest("auth.logout", { token: STATE.token });
+    localStorage.removeItem("edu_token"); location.reload();
+  });
+}
+function enterApp(){
+  ("loginPage").classList.add("hidden");("loginPage").classList.add("hidden");("loginPage").classList.add("hidden");("app").classList.remove("hidden");
+  api("bootstrap", {}, function(res){
+    if (res.status === "error") { toast(res.message,"error"); return; }
+    STATE.user = res.data.user; STATE.perms = res.data.perms;
+    STATE.currentAcademicYear = res.data.academicYear;
+    $("userChip").innerHTML = '<div class="avatar">'+esc(res.data.user.name.charAt(0))+'</div><span>'+esc(res.data.user.name)+' <small>('+esc(res.data.user.role_name)+')</small></span>';
+    renderNav(); switchTab("dashboard");
+  });
+}
+function quickAction(){
+  var map = { dashboard:"addStudent", students:"addStudent", attendance:"markAttendance", fees:"collectFee", teachers:"addTeacher" };
+  var act = map[STATE.currentTab] || "addStudent";
+  ({ addStudent:function(){ switchTab("students"); setTimeout(openStudentModal, 300); },
+     markAttendance:function(){ switchTab("attendance"); },
+     collectFee:function(){ switchTab("fees"); } })[act]();
+}
+
+/* ---------- dashboard ---------- */
+function renderDashboard(){
+  api("bootstrap", {}, function(res){
+    if (res.status === "error") return;
+    var s = res.data.stats;
+    var quick = [["New Admission","fa-file-signature","switchTab('admissions')"],["Add Student","fa-user-graduate","openStudentModal()"],
+      ["Mark Attendance","fa-calendar-check","switchTab('attendance')"],["Collect Fee","fa-money-bill","switchTab('fees')"],
+      ["Add Book","fa-book","switchTab('books')"],["Create Notice","fa-bullhorn","switchTab('notices')"]];
+    var html = '<div class="quick-actions">' + quick.map(function(q){
+      return '<div class="quick-btn" onclick="'+q[2]+'"><i class="fa-solid '+q[1]+'"></i>'+q[0]+'</div>'; }).join("") + '</div>';
+    var cards = [
+      ["Total Students", s.totalStudents, "fa-user-graduate"],["Active Students", s.activeStudents, "fa-user-check"],
+      ["Teachers", s.teachers, "fa-chalkboard-user"],["Staff", s.staff, "fa-users-gear"],
+      ["Classes", s.classes, "fa-chalkboard"],["Present Today", s.presentToday, "fa-circle-check"],
+      ["Absent Today", s.absentToday, "fa-circle-xmark"],["Late Today", s.lateToday, "fa-clock"],
+      ["Fees Collected", STATE.user && s.collected, "fa-money-bill"],["Expenses", s.expenses, "fa-receipt"],
+      ["Books", s.books, "fa-book"],["Issued Books", s.issuedBooks, "fa-book-open-reader"]
+    ];
+    html += '<div class="stat-grid">' + cards.map(function(c){
+      return '<div class="stat-card"><div class="ic"><i class="fa-solid '+c[2]+'"></i></div><div><h3>'+c[1]+'</h3><p>'+c[0]+'</p></div></div>';
+    }).join("") + '</div>';
+    html += '<div class="grid-2"><div class="card"><h3 class="card-title"><i class="fa-solid fa-chart-column"></i> Students by Class</h3><canvas id="chartEnroll" height="160"></canvas></div>' +
+      '<div class="card"><h3 class="card-title"><i class="fa-solid fa-bullhorn"></i> Recent Notices</h3>';
+    if (res.data.recentNotices.length === 0) html += emptyState("No notices yet");
+    else res.data.recentNotices.forEach(function(n){
+      html += '<div style="padding:8px 0;border-bottom:1px solid var(--border)"><b>'+esc(n.title)+'</b> '+badge(n.priority)+'<div style="font-size:12px;color:var(--muted)">'+esc(n.description)+'</div></div>';
+    });
+    html += '</div></div>';
+    $("content").innerHTML = html;
+    new Chart($("chartEnroll"), { type:"bar", data:{ labels: res.data.charts.classLabels,
+      datasets:[{ label:"Students", data: res.data.charts.classCounts, backgroundColor:"#ef4444" }] },
+      options:{ plugins:{legend:{display:false}}, scales:{y:{beginAtZero:true, ticks:{precision:0}}} } });
+  });
+}
+
+/* ---------- students ---------- */
+function renderStudents(){
+  var p = STATE.page.students || 1;
+  api("students.list", { page: p, pageSize: 15, search: ($("stuSearch")||{}).value || "" }, function(res){
+    if (res.status === "error") { toast(res.message,"error"); return; }
+    var d = res.data;
+    var html = '<div class="card"><div style="display:flex;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:10px">' +
+      '<input id="stuSearch" placeholder="Search name / admission no..." style="padding:9px 12px;border:1.5px solid var(--border);border-radius:8px;min-width:250px" ' +
+      'onkeydown="if(event.key===\'Enter\')renderStudents()">' +
+      '<button class="btn btn-primary" onclick="openStudentModal()"><i class="fa-solid fa-plus"></i> Add Student</button></div>';
+    if (d.records.length === 0) { $("content").innerHTML = html + emptyState("No students found"); return; }
+    html += '<div class="table-wrap"><table><thead><tr><th>Adm No</th><th>Name</th><th>Gender</th><th>Class</th><th>Phone</th><th>Status</th><th>Actions</th></tr></thead><tbody>';
+    d.records.forEach(function(r){
+      html += '<tr><td>'+esc(r.admission_no)+'</td><td>'+esc(r.first_name+' '+(r.last_name||''))+'</td><td>'+esc(r.gender)+'</td>'+
+        '<td>'+esc(r.class_id)+'</td><td>'+esc(r.phone)+'</td><td>'+badge(r.status)+'</td>'+
+        '<td><button class="action-btn view" title="View" onclick="viewStudent(\''+r.id+'\')"><i class="fa-solid fa-eye"></i></button>' +
+        '<button class="action-btn edit" title="Edit" onclick="openStudentModal(\''+r.id+'\')"><i class="fa-solid fa-pen"></i></button>' +
+        '<button class="action-btn del" title="Deactivate" onclick="deactivateStudent(\''+r.id+'\')"><i class="fa-solid fa-trash"></i></button></td></tr>';
+    });
+    html += '</tbody></table></div>';
+    html += '<div class="pagination">Showing '+(d.records.length)+' of '+d.total+
+      ' <button class="btn btn-sm btn-secondary" '+(d.page<=1?"disabled":"")+' onclick="STATE.page.students='+(d.page-1)+';renderStudents()">Prev</button>' +
+      ' <button class="btn btn-sm btn-secondary" '+(d.page*d.pageSize>=d.total?"disabled":"")+' onclick="STATE.page.students='+(d.page+1)+';renderStudents()">Next</button></div>';
+    $("content").innerHTML = html;
+  });
+}
+function classOptions(sel){
+  var opts = STATE.data.classes || [];
+  return opts.map(function(c){ return '<option value="'+esc(c.id)+'"'+(c.id===sel?" selected":"")+'>'+esc(c.name)+'</option>'; }).join("");
+}
+function loadClasses(cb){
+  if (STATE.data.classes) return cb();
+  api("generic.list", { sheet: "Classes", pageSize: 200 }, function(res){
+    STATE.data.classes = res.status === "ok" ? res.data.records : []; cb();
+  });
+}
+function openStudentModal(id){
+  loadClasses(function(){
+    var rec = {};
+    if (id) { openModal("Loading…","", ""); api("generic.list",{sheet:"Students",pageSize:200,search:id},function(res){
+        rec = res.data.records.filter(function(r){ return r.id===id; })[0] || {}; buildStudentForm(rec);
+      }); return; }
+    buildStudentForm(rec);
+  });
+}
+function buildStudentForm(r){
+  r = r || {};
+  var f = function(l,k,type,extra){ return '<div class="form-group"><label>'+l+'</label><input type="'+(type||"text")+'" id="f_'+k+'" value="'+esc(r[k]||"")+'" '+(extra||"")+'></div>'; };
+  openModal(r.id ? "Edit Student" : "Add Student",
+    '<div class="form-grid">' +
+    f("First Name *","first_name","text","required") + f("Last Name","last_name") +
+    '<div class="form-group"><label>Gender</label><select id="f_gender"><option>Male</option><option>Female</option><option>Other</option></select></div>' +
+    f("Date of Birth","dob","date") + f("Blood Group","blood_group") + f("Admission Date","admission_date","date") +
+    '<div class="form-group"><label>Class *</label><select id="f_class_id">'+classOptions(r.class_id)+'</select></div>' +
+    f("Roll No","roll_no","number") + f("Father Name","father_name") + f("Mother Name","mother_name") +
+    f("Phone","phone") + f("Email","email","email") + f("Emergency Contact","emergency_contact") +
+    '<div class="form-group form-full"><label>Address</label><textarea id="f_address" rows="2">'+esc(r.address||"")+'</textarea></div>' +
+    '<div class="form-group"><label>Status</label><select id="f_status"><option>Active</option><option>Inactive</option><option>Transferred</option><option>Graduated</option><option>Suspended</option></select></div>' +
+    '</div>',
+    '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+    '<button class="btn btn-primary" onclick="saveStudent(\''+(r.id||"")+'\')"><i class="fa-solid fa-save"></i> Save</button>');
+  ["gender","status"].forEach(function(k){ if(r[k]) $("f_"+k).value = r[k]; });
+}
+function saveStudent(id){
+  var data = {};
+  ["first_name","last_name","gender","dob","blood_group","admission_date","class_id","roll_no",
+   "father_name","mother_name","phone","email","emergency_contact","address","status"].forEach(function(k){
+    data[k] = ("f"+k)?("f_"+k) ?("f"​+k)?("f_"+k).value : "";
+  });
+  if (!data.first_name) { toast("First name is required","warning"); return; }
+  if (id) api("students.update", { id: id, data: data }, function(res){
+    if (res.status==="ok"){ toast(res.message,"success"); closeModal(); renderStudents(); } else toast(res.message,"error");
+  });
+  else api("students.save", { data: data }, function(res){
+    if (res.status==="ok"){ toast(res.message,"success"); closeModal(); renderStudents(); } else toast(res.message,"error");
+  });
+}
+function viewStudent(id){
+  api("students.list", { page:1, pageSize:100, search:"" }, function(res){
+    var r = res.data.records.filter(function(x){ return x.id===id; })[0]; if(!r) return;
+    openModal("Student Profile",
+      '<div style="text-align:center;margin-bottom:14px"><div style="width:64px;height:64px;border-radius:50%;background:var(--primary);color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:24px">'+
+      esc(r.first_name.charAt(0))+'</div><h3>'+esc(r.first_name+" "+(r.last_name||""))+'</h3>'+badge(r.status)+'</div>'+
+      '<div class="form-grid">'+
+      ["admission_no|Admission No","gender|Gender","dob|Date of Birth","blood_group|Blood Group","phone|Phone","email|Email","emergency_contact|Emergency Contact","academic_year|Academic Year"]
+        .map(function(x){ var p=x.split("|"); return '<div class="form-group"><label>'+p[1]+'</label><input value="'+esc(r[p[0]])+'" readonly></div>'; }).join("")+
+      '<div class="form-group form-full"><label>Address</label><textarea rows="2" readonly>'+esc(r.address)+'</textarea></div></div>');
+  });
+}
+function deactivateStudent(id){
+  confirmAction("Are you sure you want to deactivate this student?", function(){
+    api("students.delete", { id: id }, function(res){
+      if (res.status==="ok"){ toast(res.message,"success"); renderStudents(); } else toast(res.message,"error");
+    });
+  });
+}
+
+/* ---------- attendance ---------- */
+var ATT_ROWS = [];
+function renderAttendance(){
+  var today = new Date().toISOString().slice(0,10);
+  $("content").innerHTML = '<div class="card"><h3 class="card-title"><i class="fa-solid fa-calendar-check"></i> Mark Attendance</div>'.replace("</div>","</h3>") +
+    '<div class="filters"><div class="form-group"><label>Date</label><input type="date" id="attDate" value="'+today+'"></div>' +
+    '<div class="form-group"><label>Class</label><select id="attClass">'+classOptions("")+'</select></div>' +
+    '<button class="btn btn-primary" onclick="loadAttendance()">Load Students</button></div>' +
+    '<div id="attList"></div></div>';
+  loadClasses(function(){ $("attClass").innerHTML = classOptions(""); });
+}
+function loadAttendance(){
+  var cls = ("attClass").value,dt=("attClass").value, dt =("attClass").value,dt=("attDate").value;
+  if (!cls) { toast("Select a class","warning"); return; }
+  api("students.list", { filters: { class_id: cls }, pageSize: 100 }, function(res){
+    var students = res.data.records;
+    api("attendance.list", { filters: { date: dt } }, function(a){
+      var existing = {}; a.data.records.forEach(function(r){ existing[String(r.student_id)] = r.status; });
+      if (students.length === 0) { $("attList").innerHTML = emptyState("No students in this class"); return; }
+      ATT_ROWS = [];
+      var html = '<div class="card"><div style="margin-bottom:10px"><button class="btn btn-sm btn-success" onclick="markAll(\'Present\')">All Present</button> ' +
+        '<button class="btn btn-sm btn-primary" onclick="saveAttendance()"><i class="fa-solid fa-save"></i> Save Attendance</button></div>' +
+        '<div class="table-wrap"><table><thead><tr><th>Roll</th><th>Student</th><th>Status</th></tr></thead><tbody>';
+      students.forEach(function(s){
+        var st = existing[String(s.id)] || "Present";
+        ATT_ROWS.push({ student_id: s.id, status: st, class_id: cls });
+        html += '<tr><td>'+esc(s.roll_no)+'</td><td>'+esc(s.first_name+' '+(s.last_name||''))+'</td><td>' +
+          ["Present","Absent","Late","Leave","Half Day"].map(function(o){
+            return '<label style="margin-right:10px;font-size:12px"><input type="radio" name="st_'+s.id+'" value="'+o+'" '+(st===o?"checked":"")+
+              ' onchange="setAtt(\''+s.id+'\',\''+o+'\')"> '+o+'</label>'; }).join("") + '</td></tr>';
+      });
+      html += '</tbody></table></div></div>';
+      $("attList").innerHTML = html;
+    });
+  });
+}
+function setAtt(sid, st){ ATT_ROWS.forEach(function(r){ if (r.student_id === sid) r.status = st; }); }
+function markAll(st){ ATT_ROWS.forEach(function(r){ r.status = st;
+  var radios = document.getElementsByName("st_"+r.student_id);
+  for (var i=0;i<radios.length;i++) radios[i].checked = radios[i].value === st; }); }
+function saveAttendance(){
+  confirmAction("Save attendance for "+$("attDate").value+"?", function(){
+    api("attendance.save", { date: $("attDate").value, records: ATT_ROWS }, function(res){
+      if (res.status==="ok") toast(res.message,"success"); else toast(res.message,"error");
+    });
+  });
+}
+
+/* ---------- fee collection ---------- */
+function renderFeeCollection(){
+  $("content").innerHTML = '<div class="card"><h3 class="card-title"><i class="fa-solid fa-money-bill"></i> Collect Fee</h3>' +
+    '<div class="filters"><div class="form-group"><label>Search Student</label><input id="feeSearch" placeholder="Name / admission no" style="min-width:250px" onkeydown="if(event.key===\'Enter\')searchFeeStudent()"></div>' +
+    '<button class="btn btn-primary" onclick="searchFeeStudent()"><i class="fa-solid fa-magnifying-glass"></i> Search</button></div><div id="feeStudent"></div></div>';
+}
+function searchFeeStudent(){
+  api("students.list", { search: $("feeSearch").value, pageSize: 20 }, function(res){
+    var html = '<div class="table-wrap"><table><thead><tr><th>Adm No</th><th>Name</th><th>Class</th><th></th></tr></thead><tbody>';
+    res.data.records.forEach(function(s){
+      html += '<tr><td>'+esc(s.admission_no)+'</td><td>'+esc(s.first_name+' '+(s.last_name||''))+'</td><td>'+esc(s.class_id)+'</td>' +
+        '<td><button class="btn btn-sm btn-primary" onclick="openCollect(\''+s.id+'\')">Collect</button></td></tr>';
+    });
+    $("feeStudent").innerHTML = res.data.records.length ? html+'</tbody></table></div>' : emptyState("No students found");
+  });
+}
+function openCollect(sid){
+  api("fees.list", { filters: { student_id: sid } }, function(res){
+    var fees = res.data.records;
+    var total = fees.reduce(function(a,f){ return a+Number(f.amount||0); },0);
+    var paid = 0;
+    api("generic.list", { sheet: "FeePayments", filters: { student_id: sid }, pageSize: 100 }, function(p){
+      (p.data.records||[]).forEach(function(r){ paid += Number(r.amount||0); });
+      var outstanding = total - paid;
+      openModal("Collect Fee",
+        '<div class="stat-grid"><div class="stat-card"><div class="ic" style="background:var(--info)"><i class="fa-solid fa-file-invoice"></i></div><div><h3>'+total+'</h3><p>Total Fees</p></div></div>' +
+        '<div class="stat-card"><div class="ic" style="background:var(--success)"><i class="fa-solid fa-check"></i></div><div><h3>'+paid+'</h3><p>Paid</p></div></div>' +
+        '<div class="stat-card"><div class="ic" style="background:var(--danger)"><i class="fa-solid fa-hourglass-half"></i></div><div><h3>'+outstanding+'</h3><p>Outstanding</p></div></div></div>' +
+        '<div class="form-grid">' +
+        '<div class="form-group"><label>Amount *</label><input type="number" id="payAmount" min="1" value="'+Math.max(outstanding,0)+'"></div>' +
+        '<div class="form-group"><label>Method</label><select id="payMethod"><option>Cash</option><option>UPI</option><option>Bank</option><option>Card</option><option>Cheque</option></select></div>' +
+        '<div class="form-group"><label>Transaction ID</label><input id="payTxn"></div>' +
+        '<div class="form-group"><label>Remarks</label><input id="payRemarks"></div></div>',
+        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+        '<button class="btn btn-primary" onclick="submitPayment(\''+sid+'\')"><i class="fa-solid fa-receipt"></i> Record Payment</button>');
+    });
+  });
+}
+function submitPayment(sid){
+  confirmAction("Are you sure you want to record this payment?", function(){
+    api("fees.collect", { student_id: sid, amount: Number($("payAmount").value),
+      method: ("payMethod").value,txnid:("payMethod").value, txn_id:("payMethod").value,txni​d:("payTxn").value, remarks: $("payRemarks").value }, function(res){
+      if (res.status==="ok"){ toast(res.message,"success"); closeModal(); }
+      else toast(res.message,"error");
+    });
+  });
+}
+
+/* ---------- generic module renderer ---------- */
+var GENERIC_MODULES = {
+  classes:"Classes", sections:"Sections", subjects:"Subjects", houses:"Houses", timetable:"Timetable",
+  teachers:"Teachers", parents:"Parents", admissions:"Admissions", exams:"Exams", marks:"Marks",
+  feestructures:"FeeStructures", expenses:"Expenses", income:"Income", books:"Books",
+  staff:"Staff", leaves:"Leaves", vehicles:"Vehicles", homework:"Homework", notices:"Notices",
+  events:"Events", users:"Users", roles:"Roles", academicyears:"AcademicYears"
+};
+var FORM_FIELDS = {
+  Classes:[["name","Name","text",1],["code","Code","text"],["order","Order","number"],["capacity","Capacity","number"],["status","Status","select|Active,Inactive"]],
+  Sections:[["class_id","Class","text",1],["name","Section","text",1],["room","Room","text"],["capacity","Capacity","number"],["status","Status","select|Active,Inactive"]],
+  Subjects:[["name","Subject Name","text",1],["code","Code","text"],["type","Type","select|Core,Elective,Practical"],["max_marks","Max Marks","number"],["pass_marks","Pass Marks","number"],["status","Status","select|Active,Inactive"]],
+  Houses:[["name","House Name","text",1],["color","Color","text"],["status","Status","select|Active,Inactive"]],
+  Teachers:[["name","Name","text",1],["employee_id","Employee ID","text"],["gender","Gender","select|Male,Female,Other"],["dob","DOB","date"],["phone","Phone","text"],["email","Email","email"],["qualification","Qualification","text"],["department","Department","text"],["designation","Designation","text"],["joining_date","Joining Date","date"],["salary","Salary","number"],["status","Status","select|Active,Inactive"]],
+  Parents:[["name","Name","text",1],["relationship","Relationship","select|Father,Mother,Guardian"],["phone","Phone","text"],["email","Email","email"],["occupation","Occupation","text"],["status","Status","select|Active,Inactive"]],
+  AcademicYears:[["year","Academic Year","text",1],["start_date","Start Date","date"],["end_date","End Date","date"],["status","Status","select|Active,Inactive"]],
+  Exams:[["name","Exam Name","text",1],["type","Type","select|Unit Test,Monthly Test,Quarterly,Half Yearly,Pre Final,Final"],["start_date","Start Date","date"],["end_date","End Date","date"],["max_marks","Max Marks","number"],["pass_marks","Pass Marks","number"],["status","Status","select|Active,Inactive"]],
+  Books:[["title","Title","text",1],["book_code","Book Code","text"],["author","Author","text"],["publisher","Publisher","text"],["category","Category","text"],["price","Price","number"],["rack","Rack","text"],["total_copies","Total Copies","number"],["available_copies","Available","number"],["status","Status","select|Active,Inactive"]],
+  Staff:[["name","Name","text",1],["employee_id","Employee ID","text"],["department","Department","select|Administration,Accounts,Reception,Security,Housekeeping,Transport,Library,IT,Other"],["designation","Designation","text"],["phone","Phone","text"],["email","Email","email"],["joining_date","Joining Date","date"],["salary","Salary","number"],["status","Status","select|Active,Inactive"]],
+  Vehicles:[["vehicle_no","Vehicle No","text",1],["type","Type","select|Bus,Van,Other"],["capacity","Capacity","number"],["driver","Driver","text"],["driver_phone","Driver Phone","text"],["status","Status","select|Active,Inactive"]],
+  Notices:[["title","Title","text",1],["description","Description","textarea"],["audience","Audience","select|Everyone,Students,Parents,Teachers,Staff"],["priority","Priority","select|High,Medium,Low"],["publish_date","Publish Date","date"],["status","Status","select|Active,Inactive"]],
+  Events:[["title","Event Title","text",1],["type","Type","select|Annual Day,Sports Day,PTM,Holiday,Competition,Exam,Meeting,Other"],["date","Date","date"],["time","Time","text"],["venue","Venue","text"],["status","Status","select|Active,Inactive"]],
+  Homework:[["title","Title","text",1],["description","Description","textarea"],["assigned_date","Assigned Date","date"],["due_date","Due Date","date"],["status","Status","select|Active,Inactive"]],
+  FeeStructures:[["academic_year","Academic Year","text",1],["fee_type","Fee Type","select|Admission,Tuition,Exam,Library,Computer,Transport,Hostel,Activity,Uniform,Other"],["amount","Amount","number",1],["frequency","Frequency","select|One Time,Monthly,Quarterly,Half Yearly,Annual"],["status","Status","select|Active,Inactive"]],
+  Expenses:[["date","Date","date",1],["category","Category","select|Electricity,Water,Maintenance,Stationery,Transport,Salary,Events,Equipment,Other"],["description","Description","text"],["amount","Amount","number",1],["paid_to","Paid To","text"],["status","Status","select|Active,Inactive"]],
+  Income:[["date","Date","date",1],["source","Source","text",1],["description","Description","text"],["amount","Amount","number",1],["status","Status","select|Active,Inactive"]],
+  Users:[["username","Username","text",1],["name","Full Name","text",1],["role_name","Role","select|Super Admin,Administrator,Principal,Teacher,Accountant,Librarian,Parent,Staff"],["email","Email","email"],["status","Status","select|Active,Inactive"]],
+  Roles:[["name","Role Name","text",1],["description","Description","text"],["status","Status","select|Active,Inactive"]],
+  Leaves:[["person_name","Name","text",1],["person_type","Type","select|Student,Teacher,Staff"],["leave_type","Leave Type","select|Casual,Sick,Earned,Other"],["from_date","From","date"],["to_date","To","date"],["reason","Reason","text"],["status","Status","select|Pending,Approved,Rejected"]],
+  Admissions:[["student_name","Student Name","text",1],["dob","DOB","date"],["gender","Gender","select|Male,Female,Other"],["parent_name","Parent Name","text"],["phone","Phone","text"],["previous_school","Previous School","text"],["applying_class_id","Applying Class","text"],["status","Status","select|Inquiry,Application,Document Verification,Interview,Approved,Rejected,Admitted"]]
+};
+function renderGenericModule(){
+  var sheet = GENERIC_MODULES[STATE.currentTab];
+  api("generic.list", { sheet: sheet, pageSize: 15, page: STATE.page[STATE.currentTab]||1, search: ($("gSearch")||{}).value||"" }, function(res){
+    if (res.status==="error"){ $("content").innerHTML = emptyState(res.message); return; }
+    var d = res.data, fields = FORM_FIELDS[sheet] || [];
+    var cols = fields.length ? fields.map(function(f){ return f[0]; }).slice(0, 7) : d.headers.slice(1, 8);
+    var html = '<div class="card"><div style="display:flex;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:10px">' +
+      '<input id="gSearch" placeholder="Search..." style="padding:9px 12px;border:1.5px solid var(--border);border-radius:8px;min-width:220px" onkeydown="if(event.key===\'Enter\')renderGenericModule()">' +
+      (fields.length ? '<button class="btn btn-primary" onclick="openGenericForm(\''+sheet+'\',null)"><i class="fa-solid fa-plus"></i> Add</button>' : '') +
+      '</div>';
+    if (d.records.length === 0) { $("content").innerHTML = html + emptyState("No records found"); return; }
+    html += '<div class="table-wrap"><table><thead><tr>' + cols.map(function(c){ return '<th>'+esc(c.replace(/_/g,' '))+'</th>'; }).join("") + '<th>Actions</th></tr></thead><tbody>';
+    d.records.forEach(function(r){
+      html += '<tr>' + cols.map(function(c){ var v = r[c];
+        return '<td>' + (["status"].indexOf(c)!==-1 ? badge(v) : esc(String(v).length>40 ? String(v).slice(0,40)+"…" : v)) + '</td>'; }).join("") +
+        '<td>' + (fields.length ?
 
 > ⚠️ The response reached the length limit. Reply **continue** to get the rest.
+'' +
+'' : '') + '';
+});
+html += '';
+html += '
+
+Showing '+d.records.length+' of '+d.total+
+' <button class="btn btn-sm btn-secondary" '+(d.page<=1?"disabled":"")+' onclick="STATE.page[STATE.currentTab]='+(d.page-1)+';renderGenericModule()">Prev' +
+' <button class="btn btn-sm btn-secondary" '+(d.page*d.pageSize>=d.total?"disabled":"")+' onclick="STATE.page[STATE.currentTab]='+(d.page+1)+';renderGenericModule()">Next
+';
+$("content").innerHTML = html;
+});
+}
+function openGenericForm(sheet, id){
+var fields = FORM_FIELDS[sheet] || [];
+var build = function(r){
+r = r || {};
+var body = '
+' + fields.map(function(f){
+var k=f[0], l=f[1], t=f[2], req=f[3]?"required":"";
+if (t.indexOf("select|")===0){
+var opts = t.split("|")[1].split(",").map(function(o){
+return '<option'+(r[k]===o?" selected":"")+'>'+o+''; }).join("");
+return '
+'+l+'
+';
+}
+if (t==="textarea")
+return '
+'+l+''+esc(r[k]||"")+'
+';
+if (k==="class_id" || k==="applying_class_id")
+return '
+'+l+'
+-- Select --
+';
+return '
+>'+l+'<input type="'+t+'" id="f_'+k+'" value="'+esc(r[k]||"")+'" '+req+'>
+';
+}).join("") + '
+';
+openModal((r?"Edit ":"Add ")+sheet.replace(/([a-z])([A-Z])/g,"
+1
+12"), body,
+'Cancel>' +
+'<button="btn btn-primary" onclick="saveGeneric(''+sheet+'')"> Save');
+};
+if (id) {
+loadClasses(function(){
+api("generic.list", { sheet: sheet, pageSize: 200 }, function(res){
+build(res.data.records.filter(function(x){ return x.id===id; })[0] || {});
+});
+});
+} else loadClasses(function(){ build({}); });
+}
+function saveGeneric(sheet){
+var data = { id: ($("f_id")||{}).value || "" };
+(FORM_FIELDS[sheet]||[]).forEach(function(f){
+var el = $("f_"+f[0]); if (el) data[f[0]] = el.value;
+});
+api("generic.save", sheet: sheet, data: data },(res){
+if (res.statusok"){ toast(res.message,"success");(); renderGenericModule(); }
+else toast(res.message,"error");
+});
+}
+function deleteGeneric(sheet, id){
+confirmAction("Deactivate this record?", function(){
+api("generic.delete", { sheet: sheet, id: id }, function(res){
+if (res.status==="ok"){ toast(res.message,"success"); renderGenericModule(); }
+else toast(res.message,"error");
+});
+});
+}
+/* ---------- classes (custom view) ---------- */
+function renderClasses(){
+api("generic.list", { sheet: "Classes", pageSize: 50 }, function(res){
+var recs = res.data.records;
+var = '
+
+' +
+'
+Classes
+' +
+'
+Add Class
+';
+if (!recs) { $("content").innerHTML = html + emptyState("No classes yet"); return; }
+html += '
+';
+recs.forEach(function(r){
+html += '' +
+'';
+});
+$("content").innerHTML = html + '
+Class	Code	Capacity	Status	Actions
+'+esc(r.name)+'	'+esc(r.code)+'	'+esc(r.capacity)+'	'+badge(r.status)+'	' +
+'
+';
+});
+}
+/* ---------- settings ---------- */
+function renderSettings(){
+api("settings", {}, function(res){
+if (res.status==="error"){ $("content").innerHTML = emptyState(res.message); return; }
+var s = res.data;
+var groups = [
+["School Information", ["school_name","school_subtitle","address","city","state","country","pincode","phone","email","website"]],
+["Identity", ["school_code","affiliation_no","registration_no","principal_name"]],
+["Localization", ["currency","date_formattimezone","current_academic_year"]],
+["Fee & Numbering", ["receipt_prefix","student_prefix","employee_prefix","late_fee_per_day"]],
+["Grading Scale", ["grading_scale"]]
+];
+var body = groups.map(function(g){
+return '3 class="card-title" style="margin-top:16px">'+g[0]+'
+
+' +
+g[1].map(function(k){
+if (k==="grading_scale")
+return '
+Grading Scale (Grade:Min-Max|...)'+esc(s[k]||"")+'
+';
+return '
+'+k.replace(//g," ").replace(/\b\w/g,function(c){return c.toUpperCase();})<input id="set_'+k+'" value="'+esc(s[k]||"")+'">
+';
+}).join("") + '
+';
+}).join("");
+openModal("School Settings", body,
+'Cancel' +
+' Save Settings');
+});
+}
+function saveSettings(){
+var keys = ["school_name","school_subtitle","address","city","state","country","pincode","phone","email","website",
+"school_code","affiliation_no","registration_no","principal_name","currency","date_format","timezone",
+"current_academic_year","receipt_prefix","student_prefix","employee_prefix","late_fee_per_day","grading_scale"];
+var data = {}; keys.forEach(function(k){ data[k] = $("set"+k).value; });
+api("settings.save", { settings: data }, function(res){
+if (res.status==="ok") toast(res.message,"success"); else toast(res.message,"error");
+});
+}
+/* ---------- boot ---------- */
+(function boot(){
+if (STATE.token) {
+// Try to resume session silently
+google.script.run.withSuccessHandler(function(res){
+if (res.status === "ok") { STATE.user = res.data.user; enterApp(); }
+else { localStorage.removeItem("edu_token"); STATE.token = ""; }
+}).processApiRequest("auth.session", { token: STATE.token });
+}
+})();

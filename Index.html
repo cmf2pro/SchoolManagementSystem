@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <base target="_top">
+  <meta charset="UTF-8">
+  <title>EduCare School ERP</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <?!= include('Styles'); ?>
+</head>
+<body>
+  <!-- LOGIN -->
+  <div id="loginPage" class="login-page">
+    <div class="login-card">
+      <div class="login-logo"><i class="fa-solid fa-school"></i></div>
+      <h1>EduCare</h1>
+      <p class="login-sub">Complete School Management System</p>
+      <form id="loginForm" onsubmit="return doLogin(event)">
+        <div class="input-group">
+          <i class="fa-solid fa-user"></i>
+          <input type="text" id="loginUser" placeholder="Username" required autocomplete="username">
+        </div>
+        <div class="input-group">
+          <i class="fa-solid fa-lock"></i>
+          <input type="password" id="loginPass" placeholder="Password" required autocomplete="current-password">
+        </div>
+        <label class="remember"><input type="checkbox" id="rememberMe"> Remember me</label>
+        <button type="submit" class="btn-primary btn-block" id="loginBtn"><i class="fa-solid fa-right-to-bracket"></i> Secure Login</button>
+      </form>
+      <p class="login-hint">Default: admin / admin123</p>
+    </div>
+  </div>
+
+  <!-- APP -->
+  <div id="app" class="app hidden">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-brand"><i class="fa-solid fa-school"></i> <span>EduCare ERP</span></div>
+      <nav class="sidebar-nav" id="sidebarNav"></nav>
+    </aside>
+    <div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSidebar(false)"></div>
+
+    <main class="main">
+      <header class="topbar">
+        <button class="hamburger" onclick="toggleSidebar(true)"><i class="fa-solid fa-bars"></i></button>
+        <h2 id="pageTitle">Dashboard</h2>
+        <div class="topbar-right">
+          <button class="icon-btn" id="globalSearchBtn" title="Search"><i class="fa-solid fa-magnifying-glass"></i></button>
+          <button class="icon-btn" id="quickActionBtn" title="Quick action" onclick="quickAction()"><i class="fa-solid fa-plus"></i></button>
+          <div class="user-chip" id="userChip"></div>
+          <button class="icon-btn" title="Logout" onclick="doLogout()"><i class="fa-solid fa-right-from-bracket"></i></button>
+        </div>
+      </header>
+      <div class="content" id="content"></div>
+    </main>
+  </div>
+
+  <!-- MODAL -->
+  <div class="modal-backdrop hidden" id="modalBackdrop">
+    <div class="modal" id="modalBox">
+      <div class="modal-header"><h3 id="modalTitle"></h3>
+        <button class="modal-close" onclick="closeModal()">&times;</button></div>
+      <div class="modal-body" id="modalBody"></div>
+      <div class="modal-footer" id="modalFooter"></div>
+    </div>
+  </div>
+
+  <!-- CONFIRM -->
+  <div class="modal-backdrop hidden" id="confirmBackdrop">
+    <div class="modal modal-sm">
+      <div class="modal-header"><h3 id="confirmTitle">Confirm</h3></div>
+      <div class="modal-body"><p id="confirmMsg"></p></div>
+      <div class="modal-footer">
+        <button class="btn-secondary" onclick="closeConfirm()">Cancel</button>
+        <button class="btn-danger" id="confirmOk">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toasts" class="toasts"></div>
+  <div id="loadingOverlay" class="loading-overlay hidden"><div class="spinner"></div></div>
+
+  <?!= include('JavaScript'); ?>
+</body>
+</html>
